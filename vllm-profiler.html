@@ -1250,6 +1250,30 @@
     </div>
   </div>
 
+  <div class="field">
+    <label>
+      recommended_margin <span class="hint" id="recMarginVal">0.80</span>
+      <button class="help-btn" tabindex="0">?
+        <div class="tooltip-popup">
+          <strong>추천 세션 수 안전마진</strong>
+          Effective Maximum(물리/스케줄러 한계) 대비 실제 운영 권장치 비율.<br><br>
+          다음을 흡수하기 위한 여유분:<br>
+          • prefill spike: 신규 세션 유입 시 activation + KV 동시 증가<br>
+          • 블록 단편화 실시간 변동 (kv_block_efficiency는 평균값)<br>
+          • 스케줄러 큐 여유<br><br>
+          recommended = floor(effective_max × margin)<br><br>
+          • 권장: <code>0.80</code> (보수적, 안정적 운영)<br>
+          • 트래픽이 예측 가능하고 모니터링이 탄탄하면 <code>0.85~0.90</code>까지 상향 가능<br>
+          • burst가 심하거나 SLA가 엄격하면 <code>0.70~0.75</code>로 하향 권장
+        </div>
+      </button>
+    </label>
+    <div class="range-row">
+      <input type="range" id="recMargin" min="0.5" max="1.0" step="0.01" value="0.80">
+      <span class="range-val" id="recMarginDisplay">0.80</span>
+    </div>
+  </div>
+
   <div class="section-title">Advanced</div>
 
   <div class="field">
@@ -1423,8 +1447,8 @@ STEP_EXPLAINS.s6 = [
   '<p>두 가지 한계 중 작은 값이 실제 동시 세션 수를 결정합니다.</p>',
   '<h5>물리 한계 vs 스케줄러 한계</h5>',
   '<pre>physical  = floor(eff_dynamic_pool ÷ session_vram)\n            GPU VRAM이 수용 가능한 최대 세션\n\nscheduler = --max-num-seqs\n            vLLM 스케줄러 소프트웨어 상한\n\neffective = min(physical, scheduler)\nbottleneck = 더 작은 쪽</pre>',
-  '<h5>×0.80 권장 margin의 이유</h5>',
-  '<pre>① prefill spike\n   새 세션 유입 시 activation + KV 동시 증가\n   → 순간 VRAM 사용량이 정상치 초과 가능\n\n② 블록 단편화 실시간 변동\n   kv_block_efficiency는 평균값, 순간 편차 존재\n\n③ 스케줄러 큐 여유\n   effective_max 풀 점유 시 신규 요청 대기 큐 급증\n\nrecommended = floor(effective × <span class="yw">0.80</span>)</pre>',
+  '<h5>recommended_margin (기본 0.80, UI에서 조정 가능)</h5>',
+  '<pre>① prefill spike\n   새 세션 유입 시 activation + KV 동시 증가\n   → 순간 VRAM 사용량이 정상치 초과 가능\n\n② 블록 단편화 실시간 변동\n   kv_block_efficiency는 평균값, 순간 편차 존재\n\n③ 스케줄러 큐 여유\n   effective_max 풀 점유 시 신규 요청 대기 큐 급증\n\nrecommended = floor(effective × <span class="yw">recommended_margin</span>)\n\n사이드바의 recommended_margin 슬라이더로 직접 조정 가능 (기본값 0.80).</pre>',
   '<h5>Replica를 늘리는 것이 효과적인 이유</h5>',
   '<pre>TP 증가: KV heads &lt; TP면 브로드캐스트, 효율 저하\nReplica: 선형 확장, 동시 세션 = recommended × replicas</pre>',
 ].join('');
@@ -1546,6 +1570,7 @@ function linkRange(rangeId, displayId) {
 linkRange('gpuUtil',    'gpuUtilDisplay');
 linkRange('prefixRatio','prefixRatioDisplay');
 linkRange('kvEff',      'kvEffDisplay');
+linkRange('recMargin',  'recMarginDisplay');
 linkRange('wof',        'wofDisplay');
 
 $('vramPreset').addEventListener('change', () => {
@@ -1780,6 +1805,7 @@ function runProfiler() {
   const seqLenTok     = Math.round(parseFloat($('seqLen').value) * 1024);
   const prefixRatio   = parseFloat($('prefixRatio').value);
   const kvBlockEff    = parseFloat($('kvEff').value);
+  const recMargin     = parseFloat($('recMargin').value);
   const wof           = parseFloat($('wof').value);
   const actMemOverride = $('activationMem').value ? parseFloat($('activationMem').value) : null;
   const maxBatchedTok  = $('maxBatchedTokens').value ? parseInt($('maxBatchedTokens').value) : null;
@@ -2003,7 +2029,7 @@ function runProfiler() {
   const maxSessionsScheduler = maxNumSeqs;
   const maxSessions          = Math.min(maxSessionsPhysical, maxSessionsScheduler);
   const bottleneck           = maxSessionsPhysical <= maxSessionsScheduler ? 'VRAM' : 'Scheduler';
-  const recommendedSessions  = Math.max(1, Math.floor(maxSessions * 0.80));
+  const recommendedSessions  = Math.max(1, Math.floor(maxSessions * recMargin));
   const recommendedCluster   = recommendedSessions * replicas;
 
   // ── Prefix scenarios ──────────────────────────────
@@ -2057,7 +2083,7 @@ function runProfiler() {
     bottleneck, recommendedSessions, replicas, recommendedCluster,
     prefixScenarios,
     // params
-    tp, bits, gpuUtil, kvBlockEff, prefixRatio,
+    tp, bits, gpuUtil, kvBlockEff, prefixRatio, recMargin,
     sysLenTok, seqLenTok, blockSize, wof,
     attnMemGbEff, expertMemGbEff,
     // misc
@@ -2328,9 +2354,9 @@ function makeConcurrency(r) {
       cls: 'warn',
     },
     {
-      label: 'Recommended  (×0.8 target)',
+      label: `Recommended  (×${r.recMargin.toFixed(2)} target)`,
       value: r.recommendedSessions.toLocaleString(),
-      note: 'safe ops ceiling (prefill spike / frag margin)',
+      note: `safe ops ceiling (prefill spike / frag margin, margin=${r.recMargin.toFixed(2)})`,
       cls: r.replicas === 1 ? 'highlight' : '',
     },
   ];
@@ -2601,8 +2627,8 @@ function makeFormulaPanel(r) {
     `effective_max  = min(physical, scheduler) = ${V(r.maxSessions.toLocaleString(),'maxSessions')}\n` +
     `bottleneck     = ${V(r.bottleneck,'bottleneck')}\n` +
     `${sep()}` +
-    `recommended    = floor(effective_max × ${C('0.80')})  ← prefill spike + frag margin\n` +
-    `              = floor(${V(r.maxSessions.toLocaleString())} × 0.80) = ${V(r.recommendedSessions.toLocaleString(),'recommended')}` +
+    `recommended    = floor(effective_max × ${I(r.recMargin.toFixed(2),'recMargin')})  ← prefill spike + frag margin\n` +
+    `              = floor(${V(r.maxSessions.toLocaleString())} × ${I(r.recMargin.toFixed(2))}) = ${V(r.recommendedSessions.toLocaleString(),'recommended')}` +
     (r.replicas > 1
       ? `\ncluster_total  = recommended × replicas = ${V(r.recommendedSessions)} × ${I(r.replicas,'replicas')} = ${V(r.recommendedCluster.toLocaleString(),'cluster')}`
       : '');
@@ -2805,7 +2831,7 @@ function makeStep6Diagram(r) {
   <line x1="40"         y1="88" x2="40"         y2="93" stroke="#38bdf8" stroke-width="0.8"/>
   <line x1="${40+wRec}" y1="88" x2="${40+wRec}" y2="93" stroke="#38bdf8" stroke-width="0.8"/>
   <line x1="40"         y1="90" x2="${40+wRec}" y2="90" stroke="#38bdf8" stroke-width="0.8"/>
-  <text font-size="10" fill="#38bdf8" x="${40+wRec/2}" y="104" text-anchor="middle">권장 ${recSess} sessions  (×0.80)</text>
+  <text font-size="10" fill="#38bdf8" x="${40+wRec/2}" y="104" text-anchor="middle">권장 ${recSess} sessions  (×${r.recMargin.toFixed(2)})</text>
 
   <!-- brace: margin -->
   <line x1="${40+wRec}"  y1="88" x2="${40+wRec}"  y2="93" stroke="#f59e0b" stroke-width="0.8"/>
@@ -2834,8 +2860,8 @@ function makeStep6Diagram(r) {
   <text font-family="var(--mono,monospace)" font-size="10" fill="#64748b" x="52" y="202">max_sessions</text>
   <text font-family="var(--mono,monospace)" font-size="10" fill="#e2e8f0" x="220" y="202">=  floor( ${r.effectiveDynPool.toFixed(3)} GB  ÷  ${r.sessionVram.toFixed(3)} GB )  =  <tspan fill="#4ade80" font-weight="700">${maxSess} sessions</tspan></text>
 
-  <text font-family="var(--mono,monospace)" font-size="10" fill="#64748b" x="52" y="216">recommended  (×0.80)</text>
-  <text font-family="var(--mono,monospace)" font-size="10" fill="#e2e8f0" x="220" y="216">=  floor( ${maxSess}  ×  0.80 )  =  <tspan fill="#f87171" font-weight="700">${recSess} sessions</tspan></text>
+  <text font-family="var(--mono,monospace)" font-size="10" fill="#64748b" x="52" y="216">recommended  (×${r.recMargin.toFixed(2)})</text>
+  <text font-family="var(--mono,monospace)" font-size="10" fill="#e2e8f0" x="220" y="216">=  floor( ${maxSess}  ×  ${r.recMargin.toFixed(2)} )  =  <tspan fill="#f87171" font-weight="700">${recSess} sessions</tspan></text>
 </svg>`;
   return div;
 }
